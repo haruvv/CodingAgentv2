@@ -21,7 +21,7 @@ jobs:
           branch_prefix: impl/
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          prompt: |
+          custom_instructions: |
             CLAUDE.md の指示に従い、このIssueの内容を実装してください。
             実装完了後は Pull Request を作成し、`ai-generated` と `ready-for-review` ラベルを付けてください。
             また、Issueに作業完了のコメントを残してください。
