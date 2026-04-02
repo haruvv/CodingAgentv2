@@ -7,7 +7,7 @@ Claude Code CLI としての私がこのドキュメントを読む。
 
 | リポジトリ | 役割 |
 |-----------|------|
-| `haruvv/CodingAgentv2` | このワークスペース。設計・開発の作業場 |
+| `haruvv/agent-dev-studio` | このワークスペース。設計・開発の作業場 |
 | `haruvv/ai-agent-pipeline` | Reusable Workflow の定義・スクリプト管理 |
 | `haruvv/ai-agent-sandbox` | pipeline の動作確認環境 |
 
