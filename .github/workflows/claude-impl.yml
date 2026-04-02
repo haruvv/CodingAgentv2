@@ -1,0 +1,27 @@
+name: Claude Implementation
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Claude Code Action
+        uses: anthropics/claude-code-action@beta
+        with:
+          label_trigger: ready-for-impl
+          branch_prefix: impl/
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            CLAUDE.md の指示に従い、このIssueの内容を実装してください。
+            実装完了後は Pull Request を作成し、`ai-generated` と `ready-for-review` ラベルを付けてください。
+            また、Issueに作業完了のコメントを残してください。
