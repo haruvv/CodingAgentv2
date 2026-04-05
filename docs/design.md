@@ -8,12 +8,19 @@
 
 ### 1.1 アーキテクチャ概観
 
-GitHub Issues / Pull Requests をステート管理の軸とし、ラベル遷移をトリガーに各エージェントが順次起動する。
+全体は「要求受付層（agent-intake）」と「自律開発層（dev-agents）」の 2 層構造で構成される。
+
+要求受付層では、人間が Discord のスラッシュコマンドで自然言語の要求を入力し、agent-intake が LLM で解釈して GitHub Issue を起票する。自律開発層では、GitHub Issues / Pull Requests をステート管理の軸とし、ラベル遷移をトリガーに各エージェントが順次起動する。
 
 ```
 Human
   │
-  ▼ Issue 起票 + ラベル付与
+  ▼ Discord /issue コマンド（自然言語）
+agent-intake（Discord Bot）
+  │  AWS Lambda（handler + processor）
+  │  LLM（Gemini / Gemma）で自然言語を解釈
+  │  曖昧な場合は Discord 上で確認
+  ▼ Issue 自動起票 + 「要件定義作成」ラベル付与
 GitHub Issues
   │
   ├─ 要件定義エージェント  （ラベル: 要件定義作成）
@@ -398,7 +405,68 @@ PR マージ前の検証（`pull_request`）と main 保護（`push`）を最低
 
 ---
 
-## 10. 制約一覧
+## 10. agent-intake 設計
+
+### 10.1 概要
+
+agent-intake は、Discord ボットとして動作する要求受付層。人間が自然言語で入力した要求を LLM で解釈し、GitHub Issue を自動起票して dev-agents パイプラインへ引き渡す。
+
+**リポジトリ**：`haruvv/agent-intake`
+
+### 10.2 アーキテクチャ
+
+```
+Discord
+  │ POST /interactions
+  ▼
+API Gateway（HTTP API）
+  │
+  ▼
+Lambda: agent-intake-handler
+  │ 署名検証（Ed25519 / PyNaCl）
+  │ type 1 → PONG（即時返答）
+  │ type 2 → type 5 ACK 即時返答（「処理中...」表示）
+  │          ＋ processor を非同期起動（InvocationType='Event'）
+  ▼
+Lambda: agent-intake-processor
+  │ Gemini / Gemma API で自然言語を解釈
+  │ 曖昧な場合 → Discord に確認メッセージを返信（PATCH /messages/@original）
+  │ 明確な場合 → GitHub API で Issue 起票（「要件定義作成」ラベル付与）
+  └→ Discord に結果を返信（Issue URL を通知）
+```
+
+### 10.3 2 関数構成の理由
+
+Discord はインタラクション受信から 3 秒以内の ACK を要求する。LLM 推論と GitHub API 呼び出しを合わせると数十秒かかるため、handler と processor を分離して非同期化する設計とする。
+
+| 関数 | 役割 | タイムアウト |
+|---|---|---|
+| `agent-intake-handler` | 署名検証・即時 ACK・processor 非同期起動 | 3 秒以内に応答 |
+| `agent-intake-processor` | LLM 解釈・Issue 起票・Discord 返信 | 最大 30 秒 |
+
+### 10.4 ウォームアップ戦略
+
+Lambda コールドスタートが Discord の 3 秒制限に近いため、EventBridge で 5 分ごとに handler を ping してウォームアップを維持する。
+
+### 10.5 環境変数
+
+| 変数 | 対象関数 | 内容 |
+|---|---|---|
+| `DISCORD_PUBLIC_KEY` | handler | Discord アプリの公開鍵（署名検証用） |
+| `PROCESSOR_FUNCTION_NAME` | handler | processor の Lambda 関数名 |
+| `GEMINI_API_KEY` | processor | Gemini / Gemma API キー |
+| `GITHUB_TOKEN` | processor | GitHub Personal Access Token |
+| `GITHUB_REPO` | processor | Issue 起票先リポジトリ（例：`haruvv/dev-agents`） |
+
+### 10.6 エラー処理方針
+
+- Discord のインタラクショントークンが期限切れ（404）の場合、エラーは無視してリトライしない
+- processor の Lambda 非同期リトライは 0 回に設定（重複 Issue 起票を防ぐ）
+- 曖昧な要求は Issue を起票せず Discord 上で確認を求める
+
+---
+
+## 11. 制約一覧（dev-agents）
 
 | 制約 | 内容 |
 |---|---|
