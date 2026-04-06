@@ -466,7 +466,136 @@ Lambda コールドスタートが Discord の 3 秒制限に近いため、Even
 
 ---
 
-## 11. 制約一覧（dev-agents）
+## 11. 次世代アーキテクチャ設計（v2）
+
+現行MVPの検証を通じて、GitHub Actions内でのエージェント実行には構造的な限界があることが判明した。本セクションは次世代アーキテクチャの設計方針を定義する。
+
+### 11.1 設計思想の転換
+
+**現行（v1）の問題**：
+- GitHub Actions の `claude-code-base-action` はツール権限・ブランチ操作・タイムアウト等の制約が多い
+- `GITHUB_TOKEN` によるラベル変更はイベントを発火しないため PAT による回避が必要
+- Actions はトリガーとしての用途に適しているが、長時間の自律実行には不向き
+
+**v2 の方針**：GitHub Actions はトリガーと CI に限定し、実装・修正などの重処理は外部 Worker に委譲する。
+
+### 11.2 全体フロー
+
+```
+Discord
+  ↓ /issue, /create コマンド
+Lambda（agent-intake）
+  ↓ LLM（Gemma）で自然言語解釈
+GitHub Issue 起票 + ready-for-impl ラベル付与
+  ↓ issues: labeled イベント
+GitHub Actions（トリガー専用・軽量）
+  ↓ SQS にジョブメッセージを送信
+SQS
+  ↓ EventBridge Pipes
+ECS Fargate Worker（実装・コミット・PR作成）
+  ↓ PR 作成
+GitHub Actions（CI: lint / test / type check）
+  ↓ 成功 / 失敗
+GitHub Webhook
+  ↓ /webhook エンドポイント
+agent-intake / Orchestrator
+  ↓ State DB 更新
+  ├─ CI 成功 → 人間レビュー待ち
+  └─ CI 失敗 → SQS に repair job を積む
+        ↓
+     ECS Fargate Worker（修正・再コミット）
+        ↓
+     GitHub Actions（CI 再実行）
+        ↓（成功まで繰り返し、上限に達したら人間エスカレーション）
+人間レビュー
+  ↓ approve
+マージ
+```
+
+### 11.3 コンポーネント設計
+
+#### GitHub Actions（トリガー層）
+
+役割をラベルイベント検知と SQS 送信に限定する。処理時間は数秒以内。
+
+```yaml
+- name: Send job to SQS
+  run: |
+    aws sqs send-message \
+      --queue-url ${{ secrets.JOB_QUEUE_URL }} \
+      --message-body '{
+        "job_type": "implement",
+        "issue_number": "${{ github.event.issue.number }}",
+        "repo": "${{ github.repository }}",
+        "label": "${{ github.event.label.name }}"
+      }'
+```
+
+#### ECS Fargate Worker
+
+Claude Code をネイティブ実行する自律エージェント。タスクは以下の責務を持つ：
+
+- SQS からジョブを受け取り State DB で `in-progress` に更新（二重起動防止）
+- 対象リポジトリをクローン、実装ブランチを作成
+- Claude Code で実装・コミット・プッシュ
+- PR 作成 + 適切なラベル付与（PAT を使用）
+- 完了後 State DB を `pr-created` に更新
+
+#### Orchestrator（agent-intake 拡張）
+
+GitHub Webhook の `/webhook` エンドポイントを追加し、CI 結果をハンドリングする。
+
+```
+受信イベント:
+  - workflow_run (CI 完了)
+  - pull_request (PR オープン / クローズ)
+
+処理:
+  - State DB のステータス更新
+  - CI 失敗時 → repair job を SQS に積む
+  - repair 試行上限（デフォルト 3 回）超過 → needs-human ラベル付与 + Slack 通知
+```
+
+#### State DB（DynamoDB）
+
+| 属性 | 型 | 説明 |
+|---|---|---|
+| `job_id` | PK（String） | UUID |
+| `issue_number` | Number | GitHub Issue 番号 |
+| `repo` | String | 対象リポジトリ（例: `haruvv/my-app`） |
+| `status` | String | `queued` / `in-progress` / `pr-created` / `ci-running` / `ci-failed` / `done` / `failed` |
+| `pr_number` | Number | 作成された PR 番号 |
+| `ci_attempt` | Number | CI 試行回数 |
+| `repair_attempt` | Number | repair 試行回数 |
+| `created_at` | String | ISO 8601 |
+| `updated_at` | String | ISO 8601 |
+
+### 11.4 マルチリポジトリ対応（/create コマンド）
+
+v2 では実装先リポジトリを動的に指定できる設計とする。
+
+**`/create <app-name>`**：
+1. GitHub API で新規リポジトリ作成
+2. `dev-agents` のワークフローテンプレートをコピー
+3. ラベル・Secrets・Actions 権限を自動セットアップ
+4. State DB にリポジトリ情報を登録
+
+**`/issue [<repo>] <description>`**：
+- `repo` を省略した場合は登録済みリポジトリ一覧から選択
+- 指定リポジトリに Issue 起票 → Worker が該当リポジトリで実装
+
+### 11.5 v1 → v2 移行方針
+
+| フェーズ | 内容 |
+|---|---|
+| フェーズ1（現在） | GitHub Actions でパイプライン動作確認（dev-agents-sandbox） |
+| フェーズ2 | ECS Fargate Worker を実装・GitHub Actions はトリガーのみに変更 |
+| フェーズ3 | Orchestrator に Webhook エンドポイント追加・State DB 構築 |
+| フェーズ4 | `/create` コマンド実装・マルチリポジトリ対応 |
+
+---
+
+## 12. 制約一覧（dev-agents）
 
 | 制約 | 内容 |
 |---|---|
